@@ -1,26 +1,16 @@
 [build-system]
 requires = ["setuptools>=75"]
 build-backend = "setuptools.build_meta"
-
 [project]
 name = "raypack"
-version = "0.0.1"
-description = "RayPack - user-friendly lossless high-compression archive tool"
-authors = [{ name = "ray20123315" }]
+version = "0.0.2"
+description = "RayPack high-compression archive tool with explicit Smart Media mode"
 requires-python = ">=3.11"
-dependencies = [
-  "brotli>=1.1,<2",
-  "zstandard>=0.23,<1",
-]
-
+authors = [{name = "ray20123315"}]
+dependencies = ["brotli>=1.1,<2", "zstandard>=0.23,<1", "Pillow>=11,<13"]
 [project.scripts]
 raypack = "raypack.cli:main"
-
-[project.gui-scripts]
-raypack-gui = "raypack.gui:main"
-
 [tool.setuptools]
 package-dir = {"" = "src"}
-
 [tool.setuptools.packages.find]
 where = ["src"]

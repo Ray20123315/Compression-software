@@ -1,113 +1,133 @@
 name: Build and Release RayPack
-
 on:
   push:
     branches: [main]
   workflow_dispatch:
-
 permissions:
   contents: write
-
 jobs:
   windows-release:
     runs-on: windows-latest
-    timeout-minutes: 30
-
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.13'
           cache: 'pip'
           cache-dependency-path: requirements-build.txt
-
       - name: Install dependencies
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-build.txt
           pip install -e .
-
+      - name: Download and verify LGPL FFmpeg runtimes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force vendor/video-src, vendor/audio-src, vendor/video, vendor/audio | Out-Null
+          $videoUrl = 'https://github.com/serversideup/ffmpeg-lgpl-builds/releases/download/v8.1.2-27/ffmpeg-8.1.2-x86_64-pc-windows-msvc.tar.gz'
+          $videoSha = 'fb2de01912edb449a5eba1cc487696c7f71ebb7b325e5c5c69434642ec2ba6b0'
+          $audioUrl = 'https://github.com/acoustid/ffmpeg-build/releases/download/v8.1.2-1/ffmpeg-8.1.2-audio-encode-x86_64-w64-mingw32.tar.gz'
+          $audioSha = '937593a314dd529ce4db4b1e32fa259fd1ccaf288e0e6759d8faf4578cd03e9b'
+          Invoke-WebRequest -Uri $videoUrl -OutFile video.tar.gz
+          Invoke-WebRequest -Uri $audioUrl -OutFile audio.tar.gz
+          if ((Get-FileHash video.tar.gz -Algorithm SHA256).Hash.ToLower() -ne $videoSha) { throw 'Video FFmpeg SHA256 mismatch' }
+          if ((Get-FileHash audio.tar.gz -Algorithm SHA256).Hash.ToLower() -ne $audioSha) { throw 'Audio FFmpeg SHA256 mismatch' }
+          tar -xzf video.tar.gz -C vendor/video-src
+          tar -xzf audio.tar.gz -C vendor/audio-src
+          $vff = Get-ChildItem vendor/video-src -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          $vfp = Get-ChildItem vendor/video-src -Recurse -Filter ffprobe.exe | Select-Object -First 1
+          $aff = Get-ChildItem vendor/audio-src -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          $afp = Get-ChildItem vendor/audio-src -Recurse -Filter ffprobe.exe | Select-Object -First 1
+          if (-not $vff -or -not $vfp -or -not $aff -or -not $afp) { throw 'Expected FFmpeg/FFprobe executables not found' }
+          Copy-Item $vff.FullName vendor/video/ffmpeg.exe
+          Copy-Item $vfp.FullName vendor/video/ffprobe.exe
+          $videoDlls = Get-ChildItem vendor/video-src -Recurse -Filter *.dll
+          foreach ($dll in $videoDlls) { Copy-Item $dll.FullName (Join-Path vendor/video $dll.Name) -Force }
+          $requiredVideoDlls = @('libvpl-2.dll','libwinpthread-1.dll','libopenh264-7.dll')
+          foreach ($name in $requiredVideoDlls) {
+            if (-not (Test-Path (Join-Path vendor/video $name))) { throw "Expected video FFmpeg runtime DLL missing: $name" }
+          }
+          Copy-Item $aff.FullName vendor/audio/ffmpeg.exe
+          Copy-Item $afp.FullName vendor/audio/ffprobe.exe
+          "RAYPACK_FFMPEG_VIDEO=$((Resolve-Path vendor/video/ffmpeg.exe).Path)" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "RAYPACK_FFPROBE_VIDEO=$((Resolve-Path vendor/video/ffprobe.exe).Path)" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "RAYPACK_FFMPEG_AUDIO=$((Resolve-Path vendor/audio/ffmpeg.exe).Path)" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "RAYPACK_FFPROBE_AUDIO=$((Resolve-Path vendor/audio/ffprobe.exe).Path)" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          $videoVersion = (& vendor/video/ffmpeg.exe -hide_banner -version 2>&1 | Out-String)
+          Write-Host $videoVersion
+          if ($videoVersion -notmatch '--disable-gpl' -or $videoVersion -match '--enable-gpl' -or $videoVersion -match '--enable-nonfree') { throw 'Unexpected video FFmpeg licensing configuration' }
+          $audioVersion = (& vendor/audio/ffmpeg.exe -hide_banner -version 2>&1 | Out-String)
+          Write-Host $audioVersion
+          if ($audioVersion -notmatch '--disable-gpl' -or $audioVersion -match '--enable-gpl' -or $audioVersion -match '--enable-nonfree') { throw 'Unexpected audio FFmpeg licensing configuration' }
+          $audioEncoders = (& vendor/audio/ffmpeg.exe -hide_banner -encoders 2>&1 | Out-String)
+          if ($audioEncoders -notmatch 'libmp3lame') { throw 'Audio FFmpeg does not expose libmp3lame' }
       - name: Generate application icon
         shell: pwsh
         run: python scripts/make_icon.py --out assets/RayPack.ico --png assets/RayPack.png
-
       - name: Run tests
         shell: pwsh
         run: pytest -q
-
       - name: Build Windows GUI EXE
         shell: pwsh
         run: |
-          pyinstaller `
-            --noconfirm `
-            --clean `
-            --onefile `
-            --windowed `
-            --name RayPack_v0.0.1 `
-            --icon assets/RayPack.ico `
-            --version-file build/version_info.txt `
-            --paths src `
-            --hidden-import brotli `
-            --hidden-import zstandard `
-            raypack_gui_entry.py
-
+          pyinstaller --noconfirm --clean --onefile --windowed --name RayPack_v0.0.2 --icon assets/RayPack.ico --version-file build/version_info.txt --paths src --hidden-import brotli --hidden-import zstandard --hidden-import PIL --add-binary "vendor/video/ffmpeg.exe;raypack_tools/video" --add-binary "vendor/video/ffprobe.exe;raypack_tools/video" --add-binary "vendor/video/libvpl-2.dll;raypack_tools/video" --add-binary "vendor/video/libwinpthread-1.dll;raypack_tools/video" --add-binary "vendor/video/libopenh264-7.dll;raypack_tools/video" --add-binary "vendor/audio/ffmpeg.exe;raypack_tools/audio" --add-binary "vendor/audio/ffprobe.exe;raypack_tools/audio" --add-data "THIRD_PARTY_NOTICES.md;." raypack_gui_entry.py
       - name: Build Windows CLI EXE
         shell: pwsh
         run: |
-          pyinstaller `
-            --noconfirm `
-            --clean `
-            --onefile `
-            --console `
-            --name RayPackCLI_v0.0.1 `
-            --icon assets/RayPack.ico `
-            --version-file build/version_info.txt `
-            --paths src `
-            --hidden-import brotli `
-            --hidden-import zstandard `
-            raypack_cli_entry.py
-
-      - name: Smoke test packaged CLI
+          pyinstaller --noconfirm --clean --onefile --console --name RayPackCLI_v0.0.2 --icon assets/RayPack.ico --version-file build/version_info.txt --paths src --hidden-import brotli --hidden-import zstandard --hidden-import PIL --add-binary "vendor/video/ffmpeg.exe;raypack_tools/video" --add-binary "vendor/video/ffprobe.exe;raypack_tools/video" --add-binary "vendor/video/libvpl-2.dll;raypack_tools/video" --add-binary "vendor/video/libwinpthread-1.dll;raypack_tools/video" --add-binary "vendor/video/libopenh264-7.dll;raypack_tools/video" --add-binary "vendor/audio/ffmpeg.exe;raypack_tools/audio" --add-binary "vendor/audio/ffprobe.exe;raypack_tools/audio" --add-data "THIRD_PARTY_NOTICES.md;." raypack_cli_entry.py
+      - name: Smoke test packaged CLI and bundled runtimes
         shell: pwsh
         run: |
-          & .\dist\RayPackCLI_v0.0.1.exe --version
+          Remove-Item Env:RAYPACK_FFMPEG_VIDEO -ErrorAction SilentlyContinue
+          Remove-Item Env:RAYPACK_FFPROBE_VIDEO -ErrorAction SilentlyContinue
+          Remove-Item Env:RAYPACK_FFMPEG_AUDIO -ErrorAction SilentlyContinue
+          Remove-Item Env:RAYPACK_FFPROBE_AUDIO -ErrorAction SilentlyContinue
+          & .\dist\RayPackCLI_v0.0.2.exe --version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
+          $doctorRaw = (& .\dist\RayPackCLI_v0.0.2.exe doctor --json | Out-String)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Host $doctorRaw
+          $doctor = $doctorRaw | ConvertFrom-Json
+          if (-not $doctor.pillow) { throw 'Packaged doctor: Pillow unavailable' }
+          if (-not $doctor.zstandard) { throw 'Packaged doctor: zstandard unavailable' }
+          if (-not $doctor.video_ffmpeg -or -not $doctor.video_ffprobe -or -not $doctor.video_mpeg4_encoder) { throw 'Packaged doctor: bundled video FFmpeg runtime unavailable' }
+          if (-not $doctor.audio_ffmpeg -or -not $doctor.audio_ffprobe -or -not $doctor.audio_libmp3lame_encoder) { throw 'Packaged doctor: bundled MP3 runtime unavailable' }
       - name: Compute SHA-256
         shell: pwsh
         run: |
-          $files = @("RayPack_v0.0.1.exe", "RayPackCLI_v0.0.1.exe")
+          $files = @('RayPack_v0.0.2.exe','RayPackCLI_v0.0.2.exe')
           foreach ($name in $files) {
             $hash = (Get-FileHash ".\dist\$name" -Algorithm SHA256).Hash.ToLower()
             "$hash  $name" | Set-Content -NoNewline ".\dist\$name.sha256"
             Write-Host "$name SHA256=$hash"
           }
-
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: RayPack-Windows-v0.0.1
+          name: RayPack-Windows-v0.0.2
           path: |
-            dist/RayPack_v0.0.1.exe
-            dist/RayPack_v0.0.1.exe.sha256
-            dist/RayPackCLI_v0.0.1.exe
-            dist/RayPackCLI_v0.0.1.exe.sha256
+            dist/RayPack_v0.0.2.exe
+            dist/RayPack_v0.0.2.exe.sha256
+            dist/RayPackCLI_v0.0.2.exe
+            dist/RayPackCLI_v0.0.2.exe.sha256
+            THIRD_PARTY_NOTICES.md
           if-no-files-found: error
-
       - name: Create GitHub Release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "v0.0.1"
+          $tag = 'v0.0.2'
           gh release create $tag `
-            "dist/RayPack_v0.0.1.exe#RayPack_v0.0.1.exe" `
-            "dist/RayPack_v0.0.1.exe.sha256#RayPack_v0.0.1.exe.sha256" `
-            "dist/RayPackCLI_v0.0.1.exe#RayPackCLI_v0.0.1.exe" `
-            "dist/RayPackCLI_v0.0.1.exe.sha256#RayPackCLI_v0.0.1.exe.sha256" `
-            --title "RayPack v0.0.1" `
-            --notes "Windows standalone build of RayPack v0.0.1. Main GUI: RayPack_v0.0.1.exe. Optional CLI: RayPackCLI_v0.0.1.exe. Author: ray20123315. Copyright (c) 2026 ray20123315. All Rights Reserved. Verify downloads using the matching SHA-256 files."
+            'dist/RayPack_v0.0.2.exe#RayPack_v0.0.2.exe' `
+            'dist/RayPack_v0.0.2.exe.sha256#RayPack_v0.0.2.exe.sha256' `
+            'dist/RayPackCLI_v0.0.2.exe#RayPackCLI_v0.0.2.exe' `
+            'dist/RayPackCLI_v0.0.2.exe.sha256#RayPackCLI_v0.0.2.exe.sha256' `
+            'THIRD_PARTY_NOTICES.md#THIRD_PARTY_NOTICES_v0.0.2.md' `
+            --title 'RayPack v0.0.2' `
+            --notes 'RayPack v0.0.2 adds opt-in Smart Media for JPG/PNG/MP4/MP3 plus safe JAR/ZIP logical optimization. Smart is lossy: extraction restores dimensions/sample rate, not discarded original detail. Exact profiles remain byte-preserving. Bundled FFmpeg runtimes are pinned LGPL builds and are SHA-256 verified in CI. Author: ray20123315. Copyright (c) 2026 ray20123315. All Rights Reserved.'
