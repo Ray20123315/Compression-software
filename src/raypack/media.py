@@ -6,7 +6,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -69,9 +68,7 @@ def _probe(path: Path, kind: str) -> dict[str, Any] | None:
         return None
     try:
         cp = _run([ffprobe, "-v", "error", "-show_streams", "-of", "json", str(path)], timeout=45)
-        data = json.loads(cp.stdout)
-        streams = data.get("streams", [])
-        return {"streams": streams}
+        return {"streams": json.loads(cp.stdout).get("streams", [])}
     except Exception:
         return None
 
@@ -85,6 +82,20 @@ def _encoder_available(kind: str, encoder: str) -> bool:
         return encoder in cp.stdout
     except Exception:
         return False
+
+
+def _video_encoder() -> str | None:
+    if _encoder_available("video", "libopenh264"):
+        return "libopenh264"
+    if _encoder_available("video", "mpeg4"):
+        return "mpeg4"
+    return None
+
+
+def _video_encoder_args(encoder: str, *, restore: bool = False) -> list[str]:
+    if encoder == "libopenh264":
+        return ["-c:v", "libopenh264", "-b:v", "2500k" if restore else "650k", "-pix_fmt", "yuv420p"]
+    return ["-c:v", "mpeg4", "-q:v", "5" if restore else "12"]
 
 
 def doctor_report() -> dict[str, Any]:
@@ -102,7 +113,9 @@ def doctor_report() -> dict[str, Any]:
         "zstandard": zstd_ok,
         "video_ffmpeg": video_ffmpeg,
         "video_ffprobe": video_ffprobe,
+        "video_libopenh264_encoder": _encoder_available("video", "libopenh264"),
         "video_mpeg4_encoder": _encoder_available("video", "mpeg4"),
+        "video_smart_encoder": _video_encoder(),
         "audio_ffmpeg": audio_ffmpeg,
         "audio_ffprobe": audio_ffprobe,
         "audio_libmp3lame_encoder": _encoder_available("audio", "libmp3lame") or _encoder_available("video", "libmp3lame"),
@@ -126,15 +139,7 @@ def _image_transform(path: Path) -> dict[str, Any] | None:
         if len(transformed) >= path.stat().st_size:
             return None
         path.write_bytes(transformed)
-        return {
-            "kind": "image",
-            "original_format": original_format,
-            "original_width": width,
-            "original_height": height,
-            "stored_width": target[0],
-            "stored_height": target[1],
-            "stored_format": "WEBP",
-        }
+        return {"kind": "image", "original_format": original_format, "original_width": width, "original_height": height, "stored_width": target[0], "stored_height": target[1], "stored_format": "WEBP"}
     except Exception:
         return None
 
@@ -155,7 +160,8 @@ def _restore_image(path: Path, item: dict[str, Any]) -> None:
 def _video_transform(path: Path) -> dict[str, Any] | None:
     ffmpeg = find_tool("video", "ffmpeg")
     info = _probe(path, "video")
-    if not ffmpeg or not info or not _encoder_available("video", "mpeg4"):
+    encoder = _video_encoder()
+    if not ffmpeg or not info or not encoder:
         return None
     video = next((s for s in info["streams"] if s.get("codec_type") == "video"), None)
     if not video:
@@ -167,11 +173,7 @@ def _video_transform(path: Path) -> dict[str, Any] | None:
     sh = max(2, (height // 2) // 2 * 2)
     tmp = path.with_name(path.name + ".smart.mp4")
     try:
-        _run([
-            ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(path),
-            "-vf", f"scale={sw}:{sh}:flags=lanczos", "-c:v", "mpeg4", "-q:v", "12",
-            "-c:a", "aac", "-b:a", "80k", "-movflags", "+faststart", str(tmp),
-        ])
+        _run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(path), "-vf", f"scale={sw}:{sh}:flags=lanczos,format=yuv420p", *_video_encoder_args(encoder), "-c:a", "aac", "-b:a", "80k", "-movflags", "+faststart", str(tmp)])
         if not tmp.exists() or tmp.stat().st_size >= path.stat().st_size:
             tmp.unlink(missing_ok=True)
             return None
@@ -184,14 +186,11 @@ def _video_transform(path: Path) -> dict[str, Any] | None:
 
 def _restore_video(path: Path, item: dict[str, Any]) -> None:
     ffmpeg = find_tool("video", "ffmpeg")
-    if not ffmpeg or not _encoder_available("video", "mpeg4"):
-        raise RuntimeError("Smart MP4 extraction requires bundled FFmpeg with mpeg4 encoder")
+    encoder = _video_encoder()
+    if not ffmpeg or not encoder:
+        raise RuntimeError("Smart MP4 extraction requires bundled FFmpeg with a supported software video encoder")
     tmp = path.with_name(path.name + ".restore.mp4")
-    _run([
-        ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(path),
-        "-vf", f"scale={int(item['original_width'])}:{int(item['original_height'])}:flags=lanczos",
-        "-c:v", "mpeg4", "-q:v", "5", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(tmp),
-    ])
+    _run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(path), "-vf", f"scale={int(item['original_width'])}:{int(item['original_height'])}:flags=lanczos,format=yuv420p", *_video_encoder_args(encoder, restore=True), "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(tmp)])
     os.replace(tmp, path)
 
 
@@ -296,7 +295,6 @@ def stage_smart_inputs(inputs: list[Path], stage_root: Path) -> tuple[list[Path]
         else:
             shutil.copy2(source, target)
         staged.append(target)
-
     for root in staged:
         candidates = [root] if root.is_file() else [p for p in root.rglob("*") if p.is_file() and not p.is_symlink()]
         for path in candidates:
@@ -311,8 +309,7 @@ def stage_smart_inputs(inputs: list[Path], stage_root: Path) -> tuple[list[Path]
             elif ext in NESTED_ARCHIVE_EXTENSIONS:
                 item = _nested_transform(path)
             if item:
-                rel = path.relative_to(stage_root).as_posix()
-                item["path"] = rel
+                item["path"] = path.relative_to(stage_root).as_posix()
                 manifest.append(item)
     return staged, manifest
 

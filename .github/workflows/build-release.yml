@@ -63,7 +63,7 @@ jobs:
           if ($videoVersion -notmatch '--disable-gpl' -or $videoVersion -match '--enable-gpl' -or $videoVersion -match '--enable-nonfree') { throw 'Unexpected video FFmpeg licensing configuration' }
           $audioVersion = (& vendor/audio/ffmpeg.exe -hide_banner -version 2>&1 | Out-String)
           Write-Host $audioVersion
-          if ($audioVersion -notmatch '--disable-gpl' -or $audioVersion -match '--enable-gpl' -or $audioVersion -match '--enable-nonfree') { throw 'Unexpected audio FFmpeg licensing configuration' }
+          if ($audioVersion -match '--enable-gpl' -or $audioVersion -match '--enable-nonfree' -or $audioVersion -match '--enable-version3') { throw 'Unexpected audio FFmpeg licensing configuration' }
           $audioEncoders = (& vendor/audio/ffmpeg.exe -hide_banner -encoders 2>&1 | Out-String)
           if ($audioEncoders -notmatch 'libmp3lame') { throw 'Audio FFmpeg does not expose libmp3lame' }
       - name: Generate application icon
@@ -95,7 +95,7 @@ jobs:
           $doctor = $doctorRaw | ConvertFrom-Json
           if (-not $doctor.pillow) { throw 'Packaged doctor: Pillow unavailable' }
           if (-not $doctor.zstandard) { throw 'Packaged doctor: zstandard unavailable' }
-          if (-not $doctor.video_ffmpeg -or -not $doctor.video_ffprobe -or -not $doctor.video_mpeg4_encoder) { throw 'Packaged doctor: bundled video FFmpeg runtime unavailable' }
+          if (-not $doctor.video_ffmpeg -or -not $doctor.video_ffprobe -or -not $doctor.video_libopenh264_encoder -or $doctor.video_smart_encoder -ne 'libopenh264') { throw 'Packaged doctor: bundled LGPL video FFmpeg runtime unavailable' }
           if (-not $doctor.audio_ffmpeg -or -not $doctor.audio_ffprobe -or -not $doctor.audio_libmp3lame_encoder) { throw 'Packaged doctor: bundled MP3 runtime unavailable' }
       - name: Compute SHA-256
         shell: pwsh
