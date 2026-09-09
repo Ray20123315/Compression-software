@@ -1,0 +1,113 @@
+name: Build and Release RayPack
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows-release:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+          cache-dependency-path: requirements-build.txt
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-build.txt
+          pip install -e .
+
+      - name: Generate application icon
+        shell: pwsh
+        run: python scripts/make_icon.py --out assets/RayPack.ico --png assets/RayPack.png
+
+      - name: Run tests
+        shell: pwsh
+        run: pytest -q
+
+      - name: Build Windows GUI EXE
+        shell: pwsh
+        run: |
+          pyinstaller `
+            --noconfirm `
+            --clean `
+            --onefile `
+            --windowed `
+            --name RayPack_v0.0.1 `
+            --icon assets/RayPack.ico `
+            --version-file build/version_info.txt `
+            --paths src `
+            --hidden-import brotli `
+            --hidden-import zstandard `
+            src/raypack/__main__.py
+
+      - name: Build Windows CLI EXE
+        shell: pwsh
+        run: |
+          pyinstaller `
+            --noconfirm `
+            --clean `
+            --onefile `
+            --console `
+            --name RayPackCLI_v0.0.1 `
+            --icon assets/RayPack.ico `
+            --version-file build/version_info.txt `
+            --paths src `
+            --hidden-import brotli `
+            --hidden-import zstandard `
+            src/raypack/__main__.py
+
+      - name: Smoke test packaged CLI
+        shell: pwsh
+        run: |
+          & .\dist\RayPackCLI_v0.0.1.exe --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Compute SHA-256
+        shell: pwsh
+        run: |
+          $files = @("RayPack_v0.0.1.exe", "RayPackCLI_v0.0.1.exe")
+          foreach ($name in $files) {
+            $hash = (Get-FileHash ".\dist\$name" -Algorithm SHA256).Hash.ToLower()
+            "$hash  $name" | Set-Content -NoNewline ".\dist\$name.sha256"
+            Write-Host "$name SHA256=$hash"
+          }
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RayPack-Windows-v0.0.1
+          path: |
+            dist/RayPack_v0.0.1.exe
+            dist/RayPack_v0.0.1.exe.sha256
+            dist/RayPackCLI_v0.0.1.exe
+            dist/RayPackCLI_v0.0.1.exe.sha256
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "v0.0.1"
+          gh release create $tag `
+            "dist/RayPack_v0.0.1.exe#RayPack_v0.0.1.exe" `
+            "dist/RayPack_v0.0.1.exe.sha256#RayPack_v0.0.1.exe.sha256" `
+            "dist/RayPackCLI_v0.0.1.exe#RayPackCLI_v0.0.1.exe" `
+            "dist/RayPackCLI_v0.0.1.exe.sha256#RayPackCLI_v0.0.1.exe.sha256" `
+            --title "RayPack v0.0.1" `
+            --notes "Windows standalone build of RayPack v0.0.1. Main GUI: RayPack_v0.0.1.exe. Optional CLI: RayPackCLI_v0.0.1.exe. Author: ray20123315. Copyright (c) 2026 ray20123315. All Rights Reserved. Verify downloads using the matching SHA-256 files."

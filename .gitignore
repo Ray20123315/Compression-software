@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+dist/
+build-pyinstaller/
+*.spec
+assets/*.ico
+assets/*.png
+.Ray_Chen/work/
+.Ray_Chen/memory_archives/
+*.tar.gz.sha256
