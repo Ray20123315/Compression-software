@@ -53,7 +53,7 @@ jobs:
             --paths src `
             --hidden-import brotli `
             --hidden-import zstandard `
-            src/raypack/__main__.py
+            raypack_gui_entry.py
 
       - name: Build Windows CLI EXE
         shell: pwsh
@@ -69,7 +69,7 @@ jobs:
             --paths src `
             --hidden-import brotli `
             --hidden-import zstandard `
-            src/raypack/__main__.py
+            raypack_cli_entry.py
 
       - name: Smoke test packaged CLI
         shell: pwsh
